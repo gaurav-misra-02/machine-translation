@@ -5,6 +5,7 @@ This module provides helper functions for converting between text and tokens,
 which are essential for preprocessing inputs and postprocessing model outputs.
 """
 
+from typing import Generator, List, Optional, Tuple, Union
 import numpy as np
 import trax
 
@@ -15,7 +16,9 @@ VOCAB_DIR = 'data/'
 EOS = 1  # End-of-sentence token
 
 
-def tokenize(input_str, vocab_file=None, vocab_dir=None):
+def tokenize(input_str: str, 
+              vocab_file: Optional[str] = None, 
+              vocab_dir: Optional[str] = None) -> np.ndarray:
     """
     Encode a string to an array of integer tokens.
     
@@ -24,13 +27,18 @@ def tokenize(input_str, vocab_file=None, vocab_dir=None):
     rare or unseen words.
 
     Args:
-        input_str (str): Human-readable string to encode
-        vocab_file (str): Filename of the vocabulary text file
-        vocab_dir (str): Path to the vocabulary file
+        input_str: Human-readable string to encode
+        vocab_file: Filename of the vocabulary text file
+        vocab_dir: Path to the vocabulary file
   
     Returns:
-        numpy.ndarray: Tokenized version of the input string with shape (1, n_tokens)
+        Tokenized version of the input string with shape (1, n_tokens)
+    
+    Raises:
+        ValueError: If input_str is empty
     """
+    if not input_str or not input_str.strip():
+        raise ValueError("Input string cannot be empty")
     if vocab_file is None:
         vocab_file = VOCAB_FILE
     if vocab_dir is None:
@@ -49,18 +57,25 @@ def tokenize(input_str, vocab_file=None, vocab_dir=None):
     return batch_inputs
 
 
-def detokenize(integers, vocab_file=None, vocab_dir=None):
+def detokenize(integers: Union[np.ndarray, List[int]], 
+                vocab_file: Optional[str] = None, 
+                vocab_dir: Optional[str] = None) -> str:
     """
     Decode an array of integers to a human readable string.
 
     Args:
-        integers (numpy.ndarray or list): Array of integers to decode
-        vocab_file (str): Filename of the vocabulary text file
-        vocab_dir (str): Path to the vocabulary file
+        integers: Array of integers to decode
+        vocab_file: Filename of the vocabulary text file
+        vocab_dir: Path to the vocabulary file
   
     Returns:
-        str: The decoded sentence
+        The decoded sentence
+    
+    Raises:
+        ValueError: If integers is empty
     """
+    if integers is None or len(integers) == 0:
+        raise ValueError("Integers array cannot be empty")
     if vocab_file is None:
         vocab_file = VOCAB_FILE
     if vocab_dir is None:
@@ -76,7 +91,7 @@ def detokenize(integers, vocab_file=None, vocab_dir=None):
     return trax.data.detokenize(integers, vocab_file=vocab_file, vocab_dir=vocab_dir)
 
 
-def append_eos(stream):
+def append_eos(stream: Generator) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
     """
     Generator that appends EOS token to each sentence in the stream.
     
@@ -84,7 +99,7 @@ def append_eos(stream):
         stream: Generator yielding (input, target) tuples
         
     Yields:
-        tuple: (input with EOS, target with EOS)
+        (input with EOS, target with EOS)
     """
     for (inputs, targets) in stream:
         inputs_with_eos = list(inputs) + [EOS]

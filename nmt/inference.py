@@ -7,6 +7,7 @@ This module implements multiple decoding approaches:
 - Minimum Bayes Risk (MBR) decoding (high quality, slower)
 """
 
+from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 from collections import Counter
 from trax import layers as tl
@@ -14,8 +15,17 @@ from trax import layers as tl
 from .utils import tokenize, detokenize, EOS, VOCAB_FILE, VOCAB_DIR
 from .model import NMTAttn
 
+# Inference default constants
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_MBR_TEMPERATURE = 0.6
+DEFAULT_N_SAMPLES = 10
+DEFAULT_MODEL_PATH = "model.pkl.gz"
 
-def next_symbol(model, input_tokens, cur_output_tokens, temperature):
+
+def next_symbol(model: tl.Serial, 
+                input_tokens: np.ndarray, 
+                cur_output_tokens: List[int], 
+                temperature: float) -> Tuple[int, float]:
     """
     Predict the next token in the translation.
     
@@ -23,14 +33,19 @@ def next_symbol(model, input_tokens, cur_output_tokens, temperature):
     to the next power of 2 for efficiency and gets the model's prediction.
 
     Args:
-        model (tl.Serial): The NMT model
-        input_tokens (np.ndarray): Tokenized input sentence (1 x n_tokens)
-        cur_output_tokens (list): Previously generated tokens
-        temperature (float): Sampling temperature (0.0 = greedy, 1.0 = random)
+        model: The NMT model
+        input_tokens: Tokenized input sentence (1 x n_tokens)
+        cur_output_tokens: Previously generated tokens
+        temperature: Sampling temperature (0.0 = greedy, 1.0 = random)
 
     Returns:
-        tuple: (next_token_index, log_probability)
+        (next_token_index, log_probability)
+    
+    Raises:
+        ValueError: If temperature is negative
     """
+    if temperature < 0:
+        raise ValueError(f"temperature must be non-negative, got {temperature}")
     token_length = len(cur_output_tokens)
     
     # Pad to next power of 2
@@ -52,8 +67,11 @@ def next_symbol(model, input_tokens, cur_output_tokens, temperature):
     return symbol, float(log_probs[symbol])
 
 
-def sampling_decode(input_sentence, model=None, temperature=0.0, 
-                   vocab_file=None, vocab_dir=None):
+def sampling_decode(input_sentence: str, 
+                   model: Optional[tl.Serial] = None, 
+                   temperature: float = DEFAULT_TEMPERATURE, 
+                   vocab_file: Optional[str] = None, 
+                   vocab_dir: Optional[str] = None) -> Tuple[List[int], float, str]:
     """
     Translate a sentence using sampling-based decoding.
     
@@ -63,15 +81,22 @@ def sampling_decode(input_sentence, model=None, temperature=0.0,
     - 0.3-0.7: Sweet spot for diverse but reasonable translations
 
     Args:
-        input_sentence (str): Sentence to translate
-        model (tl.Serial): The NMT model
-        temperature (float): Sampling temperature (default: 0.0)
-        vocab_file (str): Vocabulary filename (default: from utils)
-        vocab_dir (str): Path to vocabulary file (default: from utils)
+        input_sentence: Sentence to translate
+        model: The NMT model (required)
+        temperature: Sampling temperature
+        vocab_file: Vocabulary filename (default: from utils)
+        vocab_dir: Path to vocabulary file (default: from utils)
 
     Returns:
-        tuple: (token_list, log_probability, translated_sentence)
+        (token_list, log_probability, translated_sentence)
+    
+    Raises:
+        ValueError: If model is None or input_sentence is empty
     """
+    if model is None:
+        raise ValueError("model cannot be None")
+    if not input_sentence or not input_sentence.strip():
+        raise ValueError("input_sentence cannot be empty")
     if vocab_file is None:
         vocab_file = VOCAB_FILE
     if vocab_dir is None:
@@ -95,7 +120,11 @@ def sampling_decode(input_sentence, model=None, temperature=0.0,
     return cur_output_tokens, log_prob, sentence
 
 
-def greedy_decode(sentence, model=None, vocab_file=None, vocab_dir=None, verbose=True):
+def greedy_decode(sentence: str, 
+                  model: Optional[tl.Serial] = None, 
+                  vocab_file: Optional[str] = None, 
+                  vocab_dir: Optional[str] = None, 
+                  verbose: bool = True) -> str:
     """
     Translate and optionally print a sentence using greedy decoding.
     
@@ -103,15 +132,22 @@ def greedy_decode(sentence, model=None, vocab_file=None, vocab_dir=None, verbose
     Fast and deterministic but can miss better overall translations.
 
     Args:
-        sentence (str): Sentence to translate
-        model (tl.Serial): The NMT model
-        vocab_file (str): Vocabulary filename (default: from utils)
-        vocab_dir (str): Path to vocabulary file (default: from utils)
-        verbose (bool): Whether to print input/output (default: True)
+        sentence: Sentence to translate
+        model: The NMT model (required)
+        vocab_file: Vocabulary filename (default: from utils)
+        vocab_dir: Path to vocabulary file (default: from utils)
+        verbose: Whether to print input/output
 
     Returns:
-        str: The translated sentence
+        The translated sentence
+    
+    Raises:
+        ValueError: If model is None or sentence is empty
     """
+    if model is None:
+        raise ValueError("model cannot be None")
+    if not sentence or not sentence.strip():
+        raise ValueError("sentence cannot be empty")
     _, _, translated_sentence = sampling_decode(
         sentence, model, temperature=0.0,
         vocab_file=vocab_file, vocab_dir=vocab_dir
@@ -128,22 +164,35 @@ def greedy_decode(sentence, model=None, vocab_file=None, vocab_dir=None, verbose
 # Minimum Bayes Risk (MBR) Decoding
 # =============================================================================
 
-def generate_samples(sentence, n_samples, model=None, temperature=0.6,
-                    vocab_file=None, vocab_dir=None):
+def generate_samples(sentence: str, 
+                    n_samples: int, 
+                    model: Optional[tl.Serial] = None, 
+                    temperature: float = DEFAULT_MBR_TEMPERATURE,
+                    vocab_file: Optional[str] = None, 
+                    vocab_dir: Optional[str] = None) -> Tuple[List[List[int]], List[float]]:
     """
     Generate multiple translation samples.
     
     Args:
-        sentence (str): Sentence to translate
-        n_samples (int): Number of samples to generate
-        model (tl.Serial): The NMT model
-        temperature (float): Sampling temperature (default: 0.6)
-        vocab_file (str): Vocabulary filename (default: from utils)
-        vocab_dir (str): Path to vocabulary file (default: from utils)
+        sentence: Sentence to translate
+        n_samples: Number of samples to generate (must be positive)
+        model: The NMT model (required)
+        temperature: Sampling temperature
+        vocab_file: Vocabulary filename (default: from utils)
+        vocab_dir: Path to vocabulary file (default: from utils)
         
     Returns:
-        tuple: (list of token lists, list of log probabilities)
+        (list of token lists, list of log probabilities)
+    
+    Raises:
+        ValueError: If model is None, n_samples is not positive, or sentence is empty
     """
+    if model is None:
+        raise ValueError("model cannot be None")
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
+    if not sentence or not sentence.strip():
+        raise ValueError("sentence cannot be empty")
     samples, log_probs = [], []
     
     for _ in range(n_samples):
@@ -155,7 +204,7 @@ def generate_samples(sentence, n_samples, model=None, temperature=0.6,
     return samples, log_probs
 
 
-def jaccard_similarity(candidate, reference):
+def jaccard_similarity(candidate: List[int], reference: List[int]) -> float:
     """
     Calculate Jaccard similarity between two token lists.
     
@@ -163,11 +212,11 @@ def jaccard_similarity(candidate, reference):
     Simple but effective measure of token overlap.
 
     Args:
-        candidate (list): Tokenized candidate translation
-        reference (list): Tokenized reference translation
+        candidate: Tokenized candidate translation
+        reference: Tokenized reference translation
 
     Returns:
-        float: Similarity score (0 to 1)
+        Similarity score (0 to 1)
     """
     can_unigram_set = set(candidate)
     ref_unigram_set = set(reference)
@@ -180,7 +229,7 @@ def jaccard_similarity(candidate, reference):
     return overlap
 
 
-def rouge1_similarity(system, reference):
+def rouge1_similarity(system: List[int], reference: List[int]) -> float:
     """
     Calculate ROUGE-1 F1 score between two token lists.
     
@@ -189,11 +238,11 @@ def rouge1_similarity(system, reference):
     an F1 score.
 
     Args:
-        system (list): Tokenized system translation
-        reference (list): Tokenized reference translation
+        system: Tokenized system translation
+        reference: Tokenized reference translation
 
     Returns:
-        float: ROUGE-1 F1 score
+        ROUGE-1 F1 score (0 to 1)
     """
     sys_counter = Counter(system)
     ref_counter = Counter(reference)
@@ -215,7 +264,9 @@ def rouge1_similarity(system, reference):
     return rouge1_score
 
 
-def average_overlap(similarity_fn, samples, *ignore_params):
+def average_overlap(similarity_fn: Callable[[List[int], List[int]], float], 
+                   samples: List[List[int]], 
+                   *ignore_params) -> Dict[int, float]:
     """
     Calculate average overlap score for each sample.
     
@@ -223,12 +274,12 @@ def average_overlap(similarity_fn, samples, *ignore_params):
     similarity score is computed.
 
     Args:
-        similarity_fn (function): Function to compute similarity
-        samples (list of lists): Token lists for each sample
+        similarity_fn: Function to compute similarity
+        samples: Token lists for each sample
         *ignore_params: Additional parameters (ignored)
 
     Returns:
-        dict: Scores for each sample {index: score}
+        Scores for each sample {index: score}
     """
     scores = {}
     
@@ -248,7 +299,9 @@ def average_overlap(similarity_fn, samples, *ignore_params):
     return scores
 
 
-def weighted_avg_overlap(similarity_fn, samples, log_probs):
+def weighted_avg_overlap(similarity_fn: Callable[[List[int], List[int]], float], 
+                        samples: List[List[int]], 
+                        log_probs: List[float]) -> Dict[int, float]:
     """
     Calculate weighted average overlap score for each sample.
     
@@ -256,12 +309,12 @@ def weighted_avg_overlap(similarity_fn, samples, log_probs):
     log probability of the reference sample.
 
     Args:
-        similarity_fn (function): Function to compute similarity
-        samples (list of lists): Token lists for each sample
-        log_probs (list): Log probabilities for each sample
+        similarity_fn: Function to compute similarity
+        samples: Token lists for each sample
+        log_probs: Log probabilities for each sample
 
     Returns:
-        dict: Scores for each sample {index: score}
+        Scores for each sample {index: score}
     """
     scores = {}
     
@@ -284,8 +337,14 @@ def weighted_avg_overlap(similarity_fn, samples, log_probs):
     return scores
 
 
-def mbr_decode(sentence, n_samples, score_fn, similarity_fn, 
-               model=None, temperature=0.6, vocab_file=None, vocab_dir=None):
+def mbr_decode(sentence: str, 
+               n_samples: int, 
+               score_fn: Callable, 
+               similarity_fn: Callable[[List[int], List[int]], float], 
+               model: Optional[tl.Serial] = None, 
+               temperature: float = DEFAULT_MBR_TEMPERATURE, 
+               vocab_file: Optional[str] = None, 
+               vocab_dir: Optional[str] = None) -> Tuple[str, int, Dict[int, float]]:
     """
     Translate using Minimum Bayes Risk decoding.
     
@@ -295,18 +354,27 @@ def mbr_decode(sentence, n_samples, score_fn, similarity_fn,
     3. Select the candidate with the highest consensus score
 
     Args:
-        sentence (str): Sentence to translate
-        n_samples (int): Number of candidate translations to generate
-        score_fn (function): Function to compute sample scores
-        similarity_fn (function): Function to compute pairwise similarity
-        model (tl.Serial): The NMT model
-        temperature (float): Sampling temperature (default: 0.6)
-        vocab_file (str): Vocabulary filename (default: from utils)
-        vocab_dir (str): Path to vocabulary file (default: from utils)
+        sentence: Sentence to translate
+        n_samples: Number of candidate translations to generate (must be positive)
+        score_fn: Function to compute sample scores
+        similarity_fn: Function to compute pairwise similarity
+        model: The NMT model (required)
+        temperature: Sampling temperature
+        vocab_file: Vocabulary filename (default: from utils)
+        vocab_dir: Path to vocabulary file (default: from utils)
 
     Returns:
-        tuple: (translated_sentence, best_sample_index, all_scores)
+        (translated_sentence, best_sample_index, all_scores)
+    
+    Raises:
+        ValueError: If model is None, n_samples is not positive, or sentence is empty
     """
+    if model is None:
+        raise ValueError("model cannot be None")
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
+    if not sentence or not sentence.strip():
+        raise ValueError("sentence cannot be empty")
     # Generate candidate translations
     samples, log_probs = generate_samples(sentence, n_samples, model, 
                                          temperature, vocab_file, vocab_dir)
@@ -327,52 +395,79 @@ def mbr_decode(sentence, n_samples, score_fn, similarity_fn,
 # Convenience Functions
 # =============================================================================
 
-def load_model(model_path="model.pkl.gz", **model_kwargs):
+def load_model(model_path: str = DEFAULT_MODEL_PATH, **model_kwargs) -> tl.Serial:
     """
     Load a trained NMT model from file.
     
     Args:
-        model_path (str): Path to saved model weights
+        model_path: Path to saved model weights
         **model_kwargs: Additional arguments for NMTAttn
         
     Returns:
-        tl.Serial: Loaded model ready for inference
+        Loaded model ready for inference
+    
+    Raises:
+        FileNotFoundError: If model file doesn't exist
+        RuntimeError: If model cannot be loaded
     """
-    model = NMTAttn(mode='eval', **model_kwargs)
-    model.init_from_file(model_path, weights_only=True)
-    model = tl.Accelerate(model)
-    return model
+    try:
+        model = NMTAttn(mode='eval', **model_kwargs)
+        model.init_from_file(model_path, weights_only=True)
+        model = tl.Accelerate(model)
+        return model
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model from {model_path}: {str(e)}") from e
 
 
-def translate_sentence(sentence, model_path="model.pkl.gz", temperature=0.0):
+def translate_sentence(sentence: str, 
+                      model_path: str = DEFAULT_MODEL_PATH, 
+                      temperature: float = DEFAULT_TEMPERATURE) -> str:
     """
     Translate a single sentence (convenience function).
     
     Args:
-        sentence (str): English sentence to translate
-        model_path (str): Path to saved model weights
-        temperature (float): Sampling temperature (0.0 for greedy)
+        sentence: English sentence to translate
+        model_path: Path to saved model weights
+        temperature: Sampling temperature (0.0 for greedy)
         
     Returns:
-        str: German translation
+        German translation
+    
+    Raises:
+        ValueError: If sentence is empty
+        FileNotFoundError: If model file doesn't exist
     """
+    if not sentence or not sentence.strip():
+        raise ValueError("sentence cannot be empty")
     model = load_model(model_path)
     _, _, translation = sampling_decode(sentence, model, temperature)
     return translation
 
 
-def mbr_translate(sentence, model_path="model.pkl.gz", n_samples=10):
+def mbr_translate(sentence: str, 
+                  model_path: str = DEFAULT_MODEL_PATH, 
+                  n_samples: int = DEFAULT_N_SAMPLES) -> str:
     """
     Translate using MBR decoding (convenience function).
     
     Args:
-        sentence (str): English sentence to translate
-        model_path (str): Path to saved model weights
-        n_samples (int): Number of candidates for MBR
+        sentence: English sentence to translate
+        model_path: Path to saved model weights
+        n_samples: Number of candidates for MBR (must be positive)
         
     Returns:
-        str: German translation
+        German translation
+    
+    Raises:
+        ValueError: If sentence is empty or n_samples is not positive
+        FileNotFoundError: If model file doesn't exist
     """
+    if not sentence or not sentence.strip():
+        raise ValueError("sentence cannot be empty")
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
     model = load_model(model_path)
     translation, _, _ = mbr_decode(
         sentence, n_samples, average_overlap, rouge1_similarity,

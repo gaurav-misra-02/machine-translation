@@ -6,11 +6,22 @@ The model uses LSTMs for sequential processing and scaled dot-product attention
 to handle long-range dependencies.
 """
 
+from typing import Tuple
 from trax import layers as tl
 from trax.fastmath import numpy as fastnp
 
+# Model default configuration constants
+DEFAULT_VOCAB_SIZE = 33300
+DEFAULT_D_MODEL = 1024
+DEFAULT_N_ENCODER_LAYERS = 2
+DEFAULT_N_DECODER_LAYERS = 2
+DEFAULT_N_ATTENTION_HEADS = 4
+DEFAULT_ATTENTION_DROPOUT = 0.0
 
-def input_encoder_fn(input_vocab_size, d_model, n_encoder_layers):
+
+def input_encoder_fn(input_vocab_size: int, 
+                      d_model: int, 
+                      n_encoder_layers: int) -> tl.Serial:
     """
     Build the input encoder network.
     
@@ -18,13 +29,22 @@ def input_encoder_fn(input_vocab_size, d_model, n_encoder_layers):
     The output activations serve as keys and values for the attention mechanism.
     
     Args:
-        input_vocab_size (int): Size of input vocabulary
-        d_model (int): Embedding dimension and LSTM hidden size
-        n_encoder_layers (int): Number of LSTM layers to stack
+        input_vocab_size: Size of input vocabulary (must be positive)
+        d_model: Embedding dimension and LSTM hidden size (must be positive)
+        n_encoder_layers: Number of LSTM layers to stack (must be positive)
         
     Returns:
-        tl.Serial: The input encoder network
+        The input encoder network
+    
+    Raises:
+        ValueError: If any parameter is not positive
     """
+    if input_vocab_size <= 0:
+        raise ValueError(f"input_vocab_size must be positive, got {input_vocab_size}")
+    if d_model <= 0:
+        raise ValueError(f"d_model must be positive, got {d_model}")
+    if n_encoder_layers <= 0:
+        raise ValueError(f"n_encoder_layers must be positive, got {n_encoder_layers}")
     input_encoder = tl.Serial( 
         # Token embedding layer
         tl.Embedding(input_vocab_size, d_model),
@@ -36,7 +56,9 @@ def input_encoder_fn(input_vocab_size, d_model, n_encoder_layers):
     return input_encoder
 
 
-def pre_attention_decoder_fn(mode, target_vocab_size, d_model):
+def pre_attention_decoder_fn(mode: str, 
+                             target_vocab_size: int, 
+                             d_model: int) -> tl.Serial:
     """
     Build the pre-attention decoder network.
     
@@ -44,13 +66,20 @@ def pre_attention_decoder_fn(mode, target_vocab_size, d_model):
     during training and provides start-of-sequence token during inference.
     
     Args:
-        mode (str): 'train' or 'eval' mode
-        target_vocab_size (int): Size of target vocabulary
-        d_model (int): Embedding dimension and LSTM hidden size
+        mode: 'train' or 'eval' mode
+        target_vocab_size: Size of target vocabulary (must be positive)
+        d_model: Embedding dimension and LSTM hidden size (must be positive)
         
     Returns:
-        tl.Serial: The pre-attention decoder network
+        The pre-attention decoder network
+    
+    Raises:
+        ValueError: If target_vocab_size or d_model is not positive
     """
+    if target_vocab_size <= 0:
+        raise ValueError(f"target_vocab_size must be positive, got {target_vocab_size}")
+    if d_model <= 0:
+        raise ValueError(f"d_model must be positive, got {d_model}")
     pre_attention_decoder = tl.Serial(
         # Shift right for autoregressive structure
         tl.ShiftRight(),
@@ -65,7 +94,10 @@ def pre_attention_decoder_fn(mode, target_vocab_size, d_model):
     return pre_attention_decoder
 
 
-def prepare_attention_input(encoder_activations, decoder_activations, inputs):
+def prepare_attention_input(encoder_activations: fastnp.ndarray, 
+                           decoder_activations: fastnp.ndarray, 
+                           inputs: fastnp.ndarray) -> Tuple[fastnp.ndarray, fastnp.ndarray, 
+                                                            fastnp.ndarray, fastnp.ndarray]:
     """
     Prepare queries, keys, values and mask for the attention mechanism.
     
@@ -73,15 +105,15 @@ def prepare_attention_input(encoder_activations, decoder_activations, inputs):
     the attention layer, including proper masking for padding tokens.
     
     Args:
-        encoder_activations (fastnp.array): Encoder output 
+        encoder_activations: Encoder output 
             Shape: (batch_size, padded_input_length, d_model)
-        decoder_activations (fastnp.array): Pre-attention decoder output
+        decoder_activations: Pre-attention decoder output
             Shape: (batch_size, padded_input_length, d_model)
-        inputs (fastnp.array): Input token IDs
+        inputs: Input token IDs
             Shape: (batch_size, padded_input_length)
     
     Returns:
-        tuple: (queries, keys, values, mask) ready for attention layer
+        (queries, keys, values, mask) ready for attention layer
     """
     # Keys and values come from encoder (source sentence)
     keys = encoder_activations
@@ -104,14 +136,14 @@ def prepare_attention_input(encoder_activations, decoder_activations, inputs):
     return queries, keys, values, mask
 
 
-def NMTAttn(input_vocab_size=33300,
-            target_vocab_size=33300,
-            d_model=1024,
-            n_encoder_layers=2,
-            n_decoder_layers=2,
-            n_attention_heads=4,
-            attention_dropout=0.0,
-            mode='train'):
+def NMTAttn(input_vocab_size: int = DEFAULT_VOCAB_SIZE,
+            target_vocab_size: int = DEFAULT_VOCAB_SIZE,
+            d_model: int = DEFAULT_D_MODEL,
+            n_encoder_layers: int = DEFAULT_N_ENCODER_LAYERS,
+            n_decoder_layers: int = DEFAULT_N_DECODER_LAYERS,
+            n_attention_heads: int = DEFAULT_N_ATTENTION_HEADS,
+            attention_dropout: float = DEFAULT_ATTENTION_DROPOUT,
+            mode: str = 'train') -> tl.Serial:
     """
     Build the complete Neural Machine Translation model with attention.
     
@@ -119,18 +151,34 @@ def NMTAttn(input_vocab_size=33300,
     The attention layer is wrapped in a residual connection to help with gradient flow.
 
     Args:
-        input_vocab_size (int): Vocab size of the input (default: 33300)
-        target_vocab_size (int): Vocab size of the target (default: 33300)
-        d_model (int): Depth of embedding (default: 1024)
-        n_encoder_layers (int): Number of LSTM layers in encoder (default: 2)
-        n_decoder_layers (int): Number of LSTM layers in decoder after attention (default: 2)
-        n_attention_heads (int): Number of attention heads (default: 4)
-        attention_dropout (float): Dropout rate for attention layer (default: 0.0)
-        mode (str): 'train', 'eval' or 'predict' (default: 'train')
+        input_vocab_size: Vocab size of the input
+        target_vocab_size: Vocab size of the target
+        d_model: Depth of embedding
+        n_encoder_layers: Number of LSTM layers in encoder
+        n_decoder_layers: Number of LSTM layers in decoder after attention
+        n_attention_heads: Number of attention heads
+        attention_dropout: Dropout rate for attention layer (0.0 to 1.0)
+        mode: 'train', 'eval' or 'predict'
 
     Returns:
-        tl.Serial: Complete LSTM sequence-to-sequence model with attention
+        Complete LSTM sequence-to-sequence model with attention
+    
+    Raises:
+        ValueError: If any parameter is invalid
     """
+    # Validate parameters
+    if input_vocab_size <= 0 or target_vocab_size <= 0:
+        raise ValueError("Vocabulary sizes must be positive")
+    if d_model <= 0:
+        raise ValueError(f"d_model must be positive, got {d_model}")
+    if n_encoder_layers <= 0 or n_decoder_layers <= 0:
+        raise ValueError("Number of layers must be positive")
+    if n_attention_heads <= 0:
+        raise ValueError(f"n_attention_heads must be positive, got {n_attention_heads}")
+    if not 0.0 <= attention_dropout <= 1.0:
+        raise ValueError(f"attention_dropout must be in [0.0, 1.0], got {attention_dropout}")
+    if mode not in ['train', 'eval', 'predict']:
+        raise ValueError(f"mode must be 'train', 'eval', or 'predict', got {mode}")
     # Build encoder and pre-attention decoder
     input_encoder = input_encoder_fn(input_vocab_size, d_model, n_encoder_layers)
     pre_attention_decoder = pre_attention_decoder_fn(mode, target_vocab_size, d_model)

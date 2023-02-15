@@ -65,6 +65,14 @@ from .utils import (
     EOS
 )
 
+# Configuration
+from .config import (
+    ModelConfig,
+    DataConfig,
+    TrainingConfig,
+    InferenceConfig
+)
+
 __all__ = [
     # Data
     'load_data',
@@ -104,5 +112,11 @@ __all__ = [
     'VOCAB_FILE',
     'VOCAB_DIR',
     'EOS',
+    
+    # Config
+    'ModelConfig',
+    'DataConfig',
+    'TrainingConfig',
+    'InferenceConfig',
 ]
 

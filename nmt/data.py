@@ -6,11 +6,19 @@ for neural machine translation training. It includes tokenization, bucketing,
 and masking operations.
 """
 
+from typing import Callable, Generator, Optional, Tuple
 import trax
 from .utils import append_eos, VOCAB_FILE, VOCAB_DIR
 
+# Constants for data pipeline configuration
+DEFAULT_MAX_LENGTH = 512
+DEFAULT_BOUNDARIES = [8, 16, 32, 64, 128, 256, 512]
+DEFAULT_BATCH_SIZES = [256, 128, 64, 32, 16, 8, 4, 2]
+EVAL_HOLDOUT_SIZE = 0.01
+PADDING_ID = 0
 
-def load_data():
+
+def load_data(data_dir: str = './data/') -> Tuple[Callable, Callable]:
     """
     Load the English-German translation dataset from OPUS.
     
@@ -18,29 +26,40 @@ def load_data():
     that's perfect for demonstrating the architecture without requiring extensive
     computational resources.
     
-    Returns:
-        tuple: (train_stream_fn, eval_stream_fn) - Generator functions for training and evaluation data
-    """
-    # Get generator function for the training set
-    train_stream_fn = trax.data.TFDS('opus/medical',
-                                     data_dir='./data/',
-                                     keys=('en', 'de'),
-                                     eval_holdout_size=0.01,
-                                     train=True)
-
-    # Get generator function for the eval set
-    eval_stream_fn = trax.data.TFDS('opus/medical',
-                                    data_dir='./data/',
-                                    keys=('en', 'de'),
-                                    eval_holdout_size=0.01,
-                                    train=False)
+    Args:
+        data_dir: Directory to store/load the data
     
-    return train_stream_fn, eval_stream_fn
+    Returns:
+        (train_stream_fn, eval_stream_fn) - Generator functions for training and evaluation data
+    
+    Raises:
+        RuntimeError: If the dataset cannot be loaded
+    """
+    try:
+        # Get generator function for the training set
+        train_stream_fn = trax.data.TFDS('opus/medical',
+                                         data_dir=data_dir,
+                                         keys=('en', 'de'),
+                                         eval_holdout_size=EVAL_HOLDOUT_SIZE,
+                                         train=True)
+
+        # Get generator function for the eval set
+        eval_stream_fn = trax.data.TFDS('opus/medical',
+                                        data_dir=data_dir,
+                                        keys=('en', 'de'),
+                                        eval_holdout_size=EVAL_HOLDOUT_SIZE,
+                                        train=False)
+        
+        return train_stream_fn, eval_stream_fn
+    except Exception as e:
+        raise RuntimeError(f"Failed to load dataset: {str(e)}") from e
 
 
-def prepare_data_pipeline(train_stream_fn, eval_stream_fn, 
-                          vocab_file=None, vocab_dir=None,
-                          max_length=512):
+def prepare_data_pipeline(train_stream_fn: Callable, 
+                          eval_stream_fn: Callable, 
+                          vocab_file: Optional[str] = None, 
+                          vocab_dir: Optional[str] = None,
+                          max_length: int = DEFAULT_MAX_LENGTH) -> Tuple[Generator, Generator]:
     """
     Build the complete data preprocessing pipeline.
     
@@ -51,13 +70,18 @@ def prepare_data_pipeline(train_stream_fn, eval_stream_fn,
     Args:
         train_stream_fn: Training data generator function
         eval_stream_fn: Evaluation data generator function
-        vocab_file (str): Vocabulary filename (default: from utils)
-        vocab_dir (str): Vocabulary directory path (default: from utils)
-        max_length (int): Maximum sequence length (default: 512)
+        vocab_file: Vocabulary filename (default: from utils)
+        vocab_dir: Vocabulary directory path (default: from utils)
+        max_length: Maximum sequence length (must be positive)
         
     Returns:
-        tuple: (train_batch_stream, eval_batch_stream) ready for training
+        (train_batch_stream, eval_batch_stream) ready for training
+    
+    Raises:
+        ValueError: If max_length is not positive
     """
+    if max_length <= 0:
+        raise ValueError(f"max_length must be positive, got {max_length}")
     if vocab_file is None:
         vocab_file = VOCAB_FILE
     if vocab_dir is None:
@@ -87,8 +111,8 @@ def prepare_data_pipeline(train_stream_fn, eval_stream_fn,
     
     # Bucketing configuration - sentences grouped by similar length
     # Short sentences get larger batch sizes, long sentences get smaller batches
-    boundaries = [8, 16, 32, 64, 128, 256, 512]
-    batch_sizes = [256, 128, 64, 32, 16, 8, 4, 2]
+    boundaries = DEFAULT_BOUNDARIES
+    batch_sizes = DEFAULT_BATCH_SIZES
     
     # Create bucketed batches
     train_batch_stream = trax.data.BucketByLength(
@@ -102,21 +126,25 @@ def prepare_data_pipeline(train_stream_fn, eval_stream_fn,
     )(filtered_eval_stream)
     
     # Add masking for padding
-    train_batch_stream = trax.data.AddLossWeights(id_to_mask=0)(train_batch_stream)
-    eval_batch_stream = trax.data.AddLossWeights(id_to_mask=0)(eval_batch_stream)
+    train_batch_stream = trax.data.AddLossWeights(id_to_mask=PADDING_ID)(train_batch_stream)
+    eval_batch_stream = trax.data.AddLossWeights(id_to_mask=PADDING_ID)(eval_batch_stream)
     
     return train_batch_stream, eval_batch_stream
 
 
-def get_data_pipeline(max_length=512):
+def get_data_pipeline(max_length: int = DEFAULT_MAX_LENGTH) -> Tuple[Generator, Generator]:
     """
     Convenience function to get complete data pipeline in one call.
     
     Args:
-        max_length (int): Maximum sequence length (default: 512)
+        max_length: Maximum sequence length
         
     Returns:
-        tuple: (train_batch_stream, eval_batch_stream)
+        (train_batch_stream, eval_batch_stream)
+    
+    Raises:
+        ValueError: If max_length is not positive
+        RuntimeError: If dataset cannot be loaded
     """
     train_stream_fn, eval_stream_fn = load_data()
     return prepare_data_pipeline(train_stream_fn, eval_stream_fn, max_length=max_length)

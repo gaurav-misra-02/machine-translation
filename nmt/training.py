@@ -5,15 +5,25 @@ This module provides functions to configure and run the training process,
 including loss functions, optimizers, learning rate schedules, and evaluation.
 """
 
+from typing import Dict, Generator, Optional
 import trax
 from trax import layers as tl
 from trax.supervised import training
 
 from .model import NMTAttn
 
+# Training default constants
+DEFAULT_LEARNING_RATE = 0.01
+DEFAULT_WARMUP_STEPS = 1000
+DEFAULT_CHECKPOINT_FREQ = 10
+DEFAULT_N_STEPS = 10
+DEFAULT_OUTPUT_DIR = 'output_dir/'
 
-def create_train_task(train_batch_stream, learning_rate=0.01, 
-                     warmup_steps=1000, checkpoint_freq=10):
+
+def create_train_task(train_batch_stream: Generator, 
+                     learning_rate: float = DEFAULT_LEARNING_RATE, 
+                     warmup_steps: int = DEFAULT_WARMUP_STEPS, 
+                     checkpoint_freq: int = DEFAULT_CHECKPOINT_FREQ) -> training.TrainTask:
     """
     Create the training task configuration.
     
@@ -22,13 +32,22 @@ def create_train_task(train_batch_stream, learning_rate=0.01,
     
     Args:
         train_batch_stream: Generator for training batches
-        learning_rate (float): Maximum learning rate (default: 0.01)
-        warmup_steps (int): Number of warmup steps (default: 1000)
-        checkpoint_freq (int): Steps between checkpoints (default: 10)
+        learning_rate: Maximum learning rate (must be positive)
+        warmup_steps: Number of warmup steps (must be non-negative)
+        checkpoint_freq: Steps between checkpoints (must be positive)
         
     Returns:
-        training.TrainTask: Configured training task
+        Configured training task
+    
+    Raises:
+        ValueError: If parameters are invalid
     """
+    if learning_rate <= 0:
+        raise ValueError(f"learning_rate must be positive, got {learning_rate}")
+    if warmup_steps < 0:
+        raise ValueError(f"warmup_steps must be non-negative, got {warmup_steps}")
+    if checkpoint_freq <= 0:
+        raise ValueError(f"checkpoint_freq must be positive, got {checkpoint_freq}")
     return training.TrainTask(
         labeled_data=train_batch_stream,
         loss_layer=tl.CrossEntropyLoss(),
@@ -38,7 +57,7 @@ def create_train_task(train_batch_stream, learning_rate=0.01,
     )
 
 
-def create_eval_task(eval_batch_stream):
+def create_eval_task(eval_batch_stream: Generator) -> training.EvalTask:
     """
     Create the evaluation task configuration.
     
@@ -48,7 +67,7 @@ def create_eval_task(eval_batch_stream):
         eval_batch_stream: Generator for evaluation batches
         
     Returns:
-        training.EvalTask: Configured evaluation task
+        Configured evaluation task
     """
     return training.EvalTask(
         labeled_data=eval_batch_stream,
@@ -56,9 +75,11 @@ def create_eval_task(eval_batch_stream):
     )
 
 
-def train_model(train_batch_stream, eval_batch_stream, 
-                n_steps=10, output_dir='output_dir/',
-                model_config=None):
+def train_model(train_batch_stream: Generator, 
+                eval_batch_stream: Generator, 
+                n_steps: int = DEFAULT_N_STEPS, 
+                output_dir: str = DEFAULT_OUTPUT_DIR,
+                model_config: Optional[Dict] = None) -> training.Loop:
     """
     Train the NMT model.
     
@@ -68,13 +89,18 @@ def train_model(train_batch_stream, eval_batch_stream,
     Args:
         train_batch_stream: Training data batch generator
         eval_batch_stream: Evaluation data batch generator
-        n_steps (int): Number of training steps (default: 10)
-        output_dir (str): Directory for saving checkpoints (default: 'output_dir/')
-        model_config (dict): Model configuration parameters (default: None uses defaults)
+        n_steps: Number of training steps (must be positive)
+        output_dir: Directory for saving checkpoints
+        model_config: Model configuration parameters (uses defaults if None)
         
     Returns:
-        training.Loop: The training loop (can be used to continue training)
+        The training loop (can be used to continue training)
+    
+    Raises:
+        ValueError: If n_steps is not positive
     """
+    if n_steps <= 0:
+        raise ValueError(f"n_steps must be positive, got {n_steps}")
     # Create tasks
     train_task = create_train_task(train_batch_stream)
     eval_task = create_eval_task(eval_batch_stream)
@@ -97,24 +123,29 @@ def train_model(train_batch_stream, eval_batch_stream,
     return training_loop
 
 
-def train_from_config(data_pipeline, config):
+def train_from_config(data_pipeline: tuple, config: Dict) -> training.Loop:
     """
     Train model from a configuration dictionary.
     
     Convenience function that accepts all training parameters in a single config dict.
     
     Args:
-        data_pipeline (tuple): (train_batch_stream, eval_batch_stream)
-        config (dict): Configuration with keys:
-            - n_steps (int): Training steps
-            - output_dir (str): Checkpoint directory
-            - model (dict): Model configuration
-            - learning_rate (float): Learning rate
-            - warmup_steps (int): Warmup steps
+        data_pipeline: (train_batch_stream, eval_batch_stream)
+        config: Configuration dictionary with optional keys:
+            - n_steps: Training steps (default: 10)
+            - output_dir: Checkpoint directory (default: 'output_dir/')
+            - model: Model configuration dict
+            - learning_rate: Learning rate
+            - warmup_steps: Warmup steps
             
     Returns:
-        training.Loop: The training loop
+        The training loop
+    
+    Raises:
+        ValueError: If data_pipeline format is invalid
     """
+    if not isinstance(data_pipeline, tuple) or len(data_pipeline) != 2:
+        raise ValueError("data_pipeline must be a tuple of (train_stream, eval_stream)")
     train_batch_stream, eval_batch_stream = data_pipeline
     
     return train_model(
