@@ -10,13 +10,23 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 import os
+from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nmt import get_data_pipeline, train_model
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -78,26 +88,46 @@ def main():
     """Main training function."""
     args = parse_args()
     
-    print("=" * 70)
-    print("Neural Machine Translation - Training")
-    print("=" * 70)
-    print(f"\nConfiguration:")
-    print(f"  Training steps: {args.steps}")
-    print(f"  Output directory: {args.output_dir}")
-    print(f"  Max sequence length: {args.max_length}")
-    print(f"  Model dimension: {args.d_model}")
-    print(f"  Encoder layers: {args.n_encoder_layers}")
-    print(f"  Decoder layers: {args.n_decoder_layers}")
-    print(f"  Attention heads: {args.n_attention_heads}")
-    print()
+    logger.info("=" * 70)
+    logger.info("Neural Machine Translation - Training")
+    logger.info("=" * 70)
+    logger.info("\nConfiguration:")
+    logger.info(f"  Training steps: {args.steps}")
+    logger.info(f"  Output directory: {args.output_dir}")
+    logger.info(f"  Max sequence length: {args.max_length}")
+    logger.info(f"  Model dimension: {args.d_model}")
+    logger.info(f"  Encoder layers: {args.n_encoder_layers}")
+    logger.info(f"  Decoder layers: {args.n_decoder_layers}")
+    logger.info(f"  Attention heads: {args.n_attention_heads}")
+    
+    # Validate arguments
+    if args.steps <= 0:
+        logger.error(f"Training steps must be positive, got {args.steps}")
+        sys.exit(1)
+    
+    if args.max_length <= 0:
+        logger.error(f"Max length must be positive, got {args.max_length}")
+        sys.exit(1)
+    
+    # Create output directory if it doesn't exist
+    output_path = Path(args.output_dir)
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory created/verified: {args.output_dir}")
+    except Exception as e:
+        logger.error(f"Failed to create output directory: {e}")
+        sys.exit(1)
     
     # Load data
-    print("Loading data...")
-    train_batch_stream, eval_batch_stream = get_data_pipeline(
-        max_length=args.max_length
-    )
-    print("Data loaded successfully!")
-    print()
+    logger.info("Loading data pipeline...")
+    try:
+        train_batch_stream, eval_batch_stream = get_data_pipeline(
+            max_length=args.max_length
+        )
+        logger.info("Data loaded successfully!")
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        sys.exit(1)
     
     # Model configuration
     model_config = {
@@ -108,21 +138,27 @@ def main():
     }
     
     # Train model
-    print(f"Starting training for {args.steps} steps...")
-    print("-" * 70)
+    logger.info(f"Starting training for {args.steps} steps...")
+    logger.info("-" * 70)
     
-    training_loop = train_model(
-        train_batch_stream,
-        eval_batch_stream,
-        n_steps=args.steps,
-        output_dir=args.output_dir,
-        model_config=model_config
-    )
-    
-    print("-" * 70)
-    print("\nTraining complete!")
-    print(f"Model checkpoints saved to: {args.output_dir}")
-    print()
+    try:
+        training_loop = train_model(
+            train_batch_stream,
+            eval_batch_stream,
+            n_steps=args.steps,
+            output_dir=args.output_dir,
+            model_config=model_config
+        )
+        
+        logger.info("-" * 70)
+        logger.info("Training complete!")
+        logger.info(f"Model checkpoints saved to: {args.output_dir}")
+    except KeyboardInterrupt:
+        logger.warning("\nTraining interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,10 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 import os
+from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,8 +24,17 @@ from nmt import (
     sampling_decode, 
     mbr_decode, 
     average_overlap, 
-    rouge1_similarity
+    rouge1_similarity,
+    jaccard_similarity
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -87,67 +98,95 @@ def main():
     """Main translation function."""
     args = parse_args()
     
-    print("=" * 70)
-    print("Neural Machine Translation - Inference")
-    print("=" * 70)
-    print(f"\nInput (English): {args.sentence}")
-    print(f"Decoding method: {args.method}")
+    logger.info("=" * 70)
+    logger.info("Neural Machine Translation - Inference")
+    logger.info("=" * 70)
+    logger.info(f"\nInput (English): {args.sentence}")
+    logger.info(f"Decoding method: {args.method}")
+    
+    # Validate input
+    if not args.sentence or not args.sentence.strip():
+        logger.error("Input sentence cannot be empty")
+        sys.exit(1)
+    
+    # Check if model file exists
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        logger.error(f"Model file not found: {args.model_path}")
+        logger.info("\nMake sure you have trained a model first:")
+        logger.info("  python scripts/train.py --steps 1000")
+        sys.exit(1)
     
     # Load model
-    print(f"\nLoading model from {args.model_path}...")
+    logger.info(f"\nLoading model from {args.model_path}...")
     try:
         model = load_model(args.model_path)
-        print("Model loaded successfully!")
+        logger.info("Model loaded successfully!")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        print("\nMake sure you have trained a model first:")
-        print("  python scripts/train.py --steps 1000")
+        logger.error(f"Error loading model: {e}")
+        sys.exit(1)
+    
+    # Validate parameters
+    if args.temperature < 0:
+        logger.error(f"Temperature must be non-negative, got {args.temperature}")
+        sys.exit(1)
+    
+    if args.samples <= 0:
+        logger.error(f"Number of samples must be positive, got {args.samples}")
         sys.exit(1)
     
     # Translate
-    print(f"\nTranslating...")
-    print("-" * 70)
+    logger.info(f"\nTranslating...")
+    logger.info("-" * 70)
     
-    if args.method == 'greedy':
-        # Greedy decoding (temperature = 0)
-        _, _, translation = sampling_decode(
-            args.sentence, 
-            model, 
-            temperature=0.0
-        )
-        print(f"\nOutput (German): {translation}")
+    try:
+        if args.method == 'greedy':
+            # Greedy decoding (temperature = 0)
+            _, _, translation = sampling_decode(
+                args.sentence, 
+                model, 
+                temperature=0.0
+            )
+            logger.info(f"\nOutput (German): {translation}")
+            
+        elif args.method == 'sampling':
+            # Sampling with temperature
+            logger.info(f"Temperature: {args.temperature}")
+            _, _, translation = sampling_decode(
+                args.sentence, 
+                model, 
+                temperature=args.temperature
+            )
+            logger.info(f"\nOutput (German): {translation}")
+            
+        elif args.method == 'mbr':
+            # MBR decoding
+            logger.info(f"Generating {args.samples} candidates...")
+            logger.info(f"Similarity metric: {args.similarity}")
+            
+            similarity_fn = (rouge1_similarity if args.similarity == 'rouge1' 
+                           else jaccard_similarity)
+            
+            translation, best_idx, scores = mbr_decode(
+                args.sentence,
+                n_samples=args.samples,
+                score_fn=average_overlap,
+                similarity_fn=similarity_fn,
+                model=model,
+                temperature=args.temperature
+            )
+            
+            logger.info(f"\nBest candidate: #{best_idx} (score: {scores[best_idx]:.4f})")
+            logger.info(f"Output (German): {translation}")
         
-    elif args.method == 'sampling':
-        # Sampling with temperature
-        print(f"Temperature: {args.temperature}")
-        _, _, translation = sampling_decode(
-            args.sentence, 
-            model, 
-            temperature=args.temperature
-        )
-        print(f"\nOutput (German): {translation}")
+        logger.info("-" * 70)
         
-    elif args.method == 'mbr':
-        # MBR decoding
-        print(f"Generating {args.samples} candidates...")
-        print(f"Similarity metric: {args.similarity}")
-        
-        similarity_fn = rouge1_similarity if args.similarity == 'rouge1' else None
-        
-        translation, best_idx, scores = mbr_decode(
-            args.sentence,
-            n_samples=args.samples,
-            score_fn=average_overlap,
-            similarity_fn=similarity_fn,
-            model=model,
-            temperature=args.temperature
-        )
-        
-        print(f"\nBest candidate: #{best_idx} (score: {scores[best_idx]:.4f})")
-        print(f"Output (German): {translation}")
-    
-    print("-" * 70)
-    print()
+    except KeyboardInterrupt:
+        logger.warning("\nTranslation interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
