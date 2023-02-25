@@ -14,4 +14,3 @@ ipython>=7.0.0
 # Optional: for better performance
 jax[cpu]>=0.2.0
 jaxlib>=0.1.0
-
