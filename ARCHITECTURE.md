@@ -262,6 +262,492 @@ __all__ = [..., 'beam_search_decode']
 ```
 4. Done! Now available as: `from nmt import beam_search_decode`
 
+## Deep Dive: Technical Implementation
+
+### Attention Mechanism Details
+
+The attention layer is the heart of the NMT model. Here's how it works:
+
+#### Scaled Dot-Product Attention Formula
+
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
+
+**Component Breakdown:**
+
+1. **Queries (Q)**: Come from decoder activations
+   - Shape: `(batch_size, target_length, d_model)`
+   - Represent "what the decoder is looking for"
+
+2. **Keys (K)**: Come from encoder activations
+   - Shape: `(batch_size, source_length, d_model)`
+   - Represent "what the encoder has available"
+
+3. **Values (V)**: Also from encoder activations
+   - Shape: `(batch_size, source_length, d_model)`
+   - Contain the actual context information
+
+4. **Scaling Factor**: $\sqrt{d_k}$
+   - Prevents dot products from becoming too large
+   - Keeps gradients stable during training
+
+#### Attention Masking
+
+The model uses masking to handle variable-length sequences:
+
+```python
+# Create mask: True for real tokens, False for padding
+mask = inputs > 0  # Padding tokens are 0
+
+# Reshape for multi-headed attention
+# Shape: (batch_size, 1, 1, source_length)
+mask = fastnp.reshape(mask, (mask.shape[0], 1, 1, mask.shape[1]))
+
+# Broadcast to: (batch_size, n_heads, target_length, source_length)
+mask = mask + fastnp.zeros((1, 1, decoder_activations.shape[1], 1))
+```
+
+**Why masking matters:**
+- Prevents attention to padding tokens
+- Ensures model focuses only on real content
+- Improves translation quality
+
+### Model Data Flow
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     INPUT SENTENCE                       │
+│            "I love machine learning"                     │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                   TOKENIZATION                           │
+│         [15, 234, 1045, 3498, 1]  (with EOS)            │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                   INPUT EMBEDDING                        │
+│         Shape: (1, 5, 1024)  [batch, seq, d_model]      │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                 ENCODER LSTM STACK                       │
+│         Layer 1: LSTM(1024) → hidden states             │
+│         Layer 2: LSTM(1024) → encoder outputs           │
+│         Output shape: (1, 5, 1024)                      │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ├─── Keys (K) & Values (V)
+                          │
+┌─────────────────────────┼───────────────────────────────┐
+│        TARGET (TRAINING) or START TOKEN (INFERENCE)      │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                   SHIFT RIGHT                            │
+│         (Teacher forcing during training)                │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│               TARGET EMBEDDING + LSTM                    │
+│         Pre-attention decoder                            │
+│         Output shape: (1, seq_len, 1024)                │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          └─── Queries (Q)
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│             MULTI-HEAD ATTENTION (n_heads=4)             │
+│                                                          │
+│  For each head:                                          │
+│    1. Compute attention scores: QK^T / sqrt(d_k)        │
+│    2. Apply softmax: attention_weights                  │
+│    3. Apply mask (ignore padding)                       │
+│    4. Weight values: attention_weights * V              │
+│    5. Concatenate all heads                             │
+│                                                          │
+│  With residual connection: output = input + attention   │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│            POST-ATTENTION DECODER LSTM STACK             │
+│         Layer 1: LSTM(1024)                             │
+│         Layer 2: LSTM(1024)                             │
+│         Output shape: (1, seq_len, 1024)                │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                OUTPUT PROJECTION                         │
+│         Dense(vocab_size=33300)                         │
+│         Shape: (1, seq_len, 33300)                      │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                    LOG SOFTMAX                           │
+│         Convert to log probabilities                     │
+│         Shape: (1, seq_len, 33300)                      │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                  DECODING STRATEGY                       │
+│  Greedy: argmax                                          │
+│  Sampling: sample from distribution                      │
+│  MBR: generate multiple, select best                    │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│               OUTPUT SENTENCE (GERMAN)                   │
+│         "Ich liebe maschinelles Lernen"                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Training Pipeline Internals
+
+#### Data Bucketing Strategy
+
+The model uses sophisticated bucketing to optimize training efficiency:
+
+```python
+# Bucket boundaries (sequence lengths)
+boundaries = [8, 16, 32, 64, 128, 256, 512]
+
+# Corresponding batch sizes (shorter = larger batches)
+batch_sizes = [256, 128, 64, 32, 16, 8, 4, 2]
+```
+
+**How it works:**
+1. Sentences are grouped by similar length
+2. Short sentences (≤8 tokens): batch_size = 256
+3. Long sentences (>256 tokens): batch_size = 2
+4. Minimizes padding waste
+5. Maximizes GPU utilization
+
+**Example:**
+```
+Bucket 1 (len ≤ 8):   ["I am", "Hello", "Yes"] → batch of 256
+Bucket 2 (len ≤ 16):  ["How are you", "Good morning"] → batch of 128
+Bucket 7 (len ≤ 512): [very long sentence] → batch of 2
+```
+
+#### Learning Rate Schedule
+
+The model uses **warmup + inverse square root decay**:
+
+```python
+lr_schedule = warmup_and_rsqrt_decay(
+    warmup_steps=1000,
+    max_learning_rate=0.01
+)
+```
+
+**Schedule visualization:**
+```
+Learning Rate
+    │
+0.01│              ╱────────╲
+    │            ╱            ╲___
+    │          ╱                  ╲___
+    │        ╱                        ╲___
+    │      ╱                              ╲___
+    │    ╱                                    ╲___
+    │  ╱                                          ╲___
+0.00└───────────────────────────────────────────────────> Steps
+    0   500  1000 1500 2000 2500 3000 3500 4000
+        │    │
+        │    └─ Peak (after warmup)
+        └────── Warmup phase
+```
+
+**Why this schedule:**
+1. **Warmup (0-1000 steps)**: Prevents instability in early training
+2. **Peak (step 1000)**: Maximum learning rate for fast learning
+3. **Decay (1000+)**: Gradually decrease for fine-tuning
+
+### Inference Decoding Strategies
+
+#### 1. Greedy Decoding
+
+**Algorithm:**
+```
+1. Start with EOS token
+2. For each position:
+   a. Get model predictions
+   b. Select token with highest probability
+   c. Append to output
+3. Stop when EOS is generated or max_length reached
+```
+
+**Pros:** Fast, deterministic
+**Cons:** Can get stuck in local optima
+
+**Complexity:** O(n) where n = output length
+
+#### 2. Temperature Sampling
+
+**Algorithm:**
+```
+1. Start with EOS token
+2. For each position:
+   a. Get model predictions (logits)
+   b. Apply temperature: logits / temperature
+   c. Sample from softmax distribution
+   d. Append to output
+3. Stop when EOS is generated
+```
+
+**Temperature effect:**
+- `T = 0.0`: Equivalent to greedy (argmax)
+- `T = 1.0`: Sample from true distribution
+- `T > 1.0`: More random (flatter distribution)
+- `T < 1.0`: More confident (sharper distribution)
+
+**Example:**
+```python
+Original probabilities: [0.5, 0.3, 0.15, 0.05]
+
+T = 0.1 (confident): [0.9, 0.08, 0.015, 0.005]
+T = 1.0 (balanced):  [0.5, 0.3, 0.15, 0.05]
+T = 2.0 (diverse):   [0.35, 0.3, 0.22, 0.13]
+```
+
+**Complexity:** O(n) where n = output length
+
+#### 3. Minimum Bayes Risk (MBR) Decoding
+
+**Algorithm:**
+```
+1. Generate N candidate translations (using sampling)
+2. For each candidate i:
+   a. Compare with all other candidates j
+   b. Compute similarity: sim(i, j)
+   c. Average similarity score: score(i)
+3. Return candidate with highest score
+```
+
+**Pseudocode:**
+```python
+def mbr_decode(sentence, n_samples=10):
+    # Generate candidates
+    candidates = []
+    for _ in range(n_samples):
+        translation = sampling_decode(sentence, temperature=0.6)
+        candidates.append(translation)
+    
+    # Score each candidate
+    scores = {}
+    for i, candidate_i in enumerate(candidates):
+        score = 0
+        for j, candidate_j in enumerate(candidates):
+            if i != j:
+                score += similarity(candidate_i, candidate_j)
+        scores[i] = score / (n_samples - 1)
+    
+    # Return best
+    best_idx = max(scores, key=scores.get)
+    return candidates[best_idx]
+```
+
+**Similarity Metrics:**
+
+1. **ROUGE-1** (Recommended):
+   ```python
+   def rouge1_similarity(system, reference):
+       # Count unigram overlaps
+       overlap = count_matches(system, reference)
+       precision = overlap / len(system)
+       recall = overlap / len(reference)
+       f1 = 2 * precision * recall / (precision + recall)
+       return f1
+   ```
+
+2. **Jaccard**:
+   ```python
+   def jaccard_similarity(candidate, reference):
+       intersection = set(candidate) & set(reference)
+       union = set(candidate) | set(reference)
+       return len(intersection) / len(union)
+   ```
+
+**Complexity:** O(n × m²) where n = output length, m = n_samples
+
+**Trade-off:**
+- Quality: MBR > Sampling > Greedy
+- Speed: Greedy > Sampling > MBR
+
+### Memory Management
+
+#### Sequence Padding Strategy
+
+Sequences are padded to the next power of 2 for efficiency:
+
+```python
+def pad_to_power_of_2(sequence):
+    length = len(sequence)
+    padded_length = 2 ** int(np.ceil(np.log2(length + 1)))
+    return sequence + [0] * (padded_length - length)
+```
+
+**Example:**
+```
+Length 5 → Pad to 8:   [1, 2, 3, 4, 5] → [1, 2, 3, 4, 5, 0, 0, 0]
+Length 12 → Pad to 16: [tokens...] → [tokens..., 0, 0, 0, 0]
+Length 100 → Pad to 128: [tokens...] → [tokens..., 0...0]
+```
+
+**Why powers of 2:**
+- GPU optimization (memory alignment)
+- Efficient tensor operations
+- Minimal padding overhead
+
+#### Gradient Management
+
+The model uses several techniques to maintain gradient flow:
+
+1. **Residual Connections:**
+   ```python
+   # Around attention layer
+   output = input + attention(input)
+   ```
+   - Provides gradient highway
+   - Prevents vanishing gradients
+
+2. **Learning Rate Warmup:**
+   - Stabilizes early training
+   - Prevents gradient explosion
+
+3. **Gradient Clipping (in Trax):**
+   - Automatic gradient clipping
+   - Prevents gradient explosion in LSTMs
+
+### Performance Optimization
+
+#### Bucketing Impact
+
+Without bucketing:
+```
+Batch: [len=10, len=100, len=50]
+Padded: [100, 100, 100]
+Efficiency: 160/300 = 53% (lots of padding waste)
+```
+
+With bucketing:
+```
+Batch 1: [len=10, len=12, len=8]  → Padded to 16
+Batch 2: [len=100, len=95, len=98] → Padded to 128
+Efficiency: ~85% (minimal padding waste)
+```
+
+**Result:** ~1.6x speedup in training
+
+#### Model Size
+
+```
+Embedding layers:  33,300 × 1,024 × 2 = ~68M parameters
+Encoder LSTMs:     1,024 × 4 × 1,024 × 2 = ~8M parameters
+Decoder LSTMs:     1,024 × 4 × 1,024 × 3 = ~12M parameters
+Attention:         1,024 × 1,024 × 4 = ~4M parameters
+Output layer:      1,024 × 33,300 = ~34M parameters
+─────────────────────────────────────────────────────────
+Total:             ~126M parameters
+Model size:        ~500MB (float32)
+```
+
+### Extension Points
+
+#### Adding New Architecture Components
+
+**Example: Add Layer Normalization**
+
+1. Modify `nmt/model.py`:
+```python
+def NMTAttn(..., use_layer_norm=False):
+    # After attention
+    if use_layer_norm:
+        model.append(tl.LayerNorm())
+    # Continue building model
+```
+
+2. Update `ModelConfig` in `nmt/config.py`:
+```python
+@dataclass
+class ModelConfig:
+    # Existing fields...
+    use_layer_norm: bool = False
+```
+
+#### Adding New Decoding Strategy
+
+**Example: Add Beam Search**
+
+1. Add to `nmt/inference.py`:
+```python
+def beam_search_decode(
+    sentence: str,
+    model: tl.Serial,
+    beam_width: int = 5,
+    vocab_file: Optional[str] = None,
+    vocab_dir: Optional[str] = None
+) -> Tuple[List[int], float, str]:
+    """Beam search decoding."""
+    # Implementation
+    pass
+```
+
+2. Export in `nmt/__init__.py`:
+```python
+from .inference import beam_search_decode
+__all__ = [..., 'beam_search_decode']
+```
+
+3. Add to `scripts/translate.py`:
+```python
+parser.add_argument(
+    '--method',
+    choices=['greedy', 'sampling', 'mbr', 'beam'],
+    default='greedy'
+)
+```
+
+### Testing Strategy
+
+Recommended test structure:
+
+```
+tests/
+├── test_data.py        # Test data pipeline
+├── test_model.py       # Test model architecture
+├── test_training.py    # Test training logic
+├── test_inference.py   # Test decoding strategies
+└── test_utils.py       # Test utilities
+```
+
+**Example test:**
+```python
+def test_rouge1_similarity():
+    """Test ROUGE-1 computation."""
+    system = [1, 2, 3, 4]
+    reference = [1, 2, 5, 6]
+    
+    score = rouge1_similarity(system, reference)
+    
+    # 2 matches out of 4 tokens
+    expected_precision = 0.5
+    expected_recall = 0.5
+    expected_f1 = 0.5
+    
+    assert abs(score - expected_f1) < 1e-5
+```
+
 ## Conclusion
 
 The modular structure provides:
@@ -270,6 +756,8 @@ The modular structure provides:
 - ✅ Improved testability
 - ✅ Professional code structure
 - ✅ Backward compatibility
+- ✅ Extensible architecture
+- ✅ Production-ready code quality
 
 All without changing the functionality or API!
 
